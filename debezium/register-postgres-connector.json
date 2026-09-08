@@ -1,0 +1,21 @@
+{
+  "name": "shipment-postgres-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "shipment_user",
+    "database.password": "shipment_pass",
+    "database.dbname": "shipment_db",
+    "topic.prefix": "shipment",
+    "plugin.name": "pgoutput",
+    "publication.name": "shipment_pipeline_pub",
+    "slot.name": "shipment_pipeline_slot",
+    "table.include.list": "public.customers,public.carriers,public.locations,public.shipments",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter.schemas.enable": "false",
+    "tombstones.on.delete": "false"
+  }
+}

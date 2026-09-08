@@ -1,0 +1,29 @@
+# Environment / secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv
+venv/
+*.egg-info/
+
+# Spark / Delta
+spark-warehouse/
+metastore_db/
+*.crc
+_delta_log/
+derby.log
+
+# Data (local Delta tables, generated data — don't commit data itself)
+data/
+*.parquet
+
+# Docker
+docker-compose.override.yml
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
