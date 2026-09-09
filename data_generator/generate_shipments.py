@@ -17,21 +17,27 @@ Usage:
 """
 
 import argparse
+import os
 import random
 import time
 from datetime import datetime
+from pathlib import Path
 
 import psycopg2
+from dotenv import load_dotenv
 from faker import Faker
+
+# Load .env from the repo root, regardless of which directory this script is run from.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 fake = Faker()
 
 DB_CONFIG = {
     "host": "localhost",
-    "port": 5432,
-    "dbname": "shipment_db",
-    "user": "shipment_user",
-    "password": "shipment_pass",
+    "port": int(os.getenv("POSTGRES_PORT", 5432)),
+    "dbname": os.getenv("POSTGRES_DB", "shipment_db"),
+    "user": os.getenv("POSTGRES_USER", "shipment_user"),
+    "password": os.getenv("POSTGRES_PASSWORD", "shipment_pass"),
 }
 
 # Happy-path progression. Each shipment moves forward one stage at a time.
