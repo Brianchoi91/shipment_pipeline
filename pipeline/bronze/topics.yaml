@@ -1,0 +1,11 @@
+# Each entry maps one Debezium/Kafka topic to its bronze Delta table.
+# To add a new source table later: add an entry here, nothing else changes.
+topics:
+  - topic: shipment.public.shipments
+    table: shipments
+  - topic: shipment.public.customers
+    table: customers
+  - topic: shipment.public.carriers
+    table: carriers
+  - topic: shipment.public.locations
+    table: locations

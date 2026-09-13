@@ -43,6 +43,13 @@ DB_CONFIG = {
 # Happy-path progression. Each shipment moves forward one stage at a time.
 HAPPY_PATH = ["created", "picked_up", "in_transit", "out_for_delivery", "delivered"]
 
+# Probability that a shipment still in 'created' status gets cancelled (deleted)
+# instead of progressing to picked_up -- simulates a customer cancellation or
+# duplicate-order cleanup before anything physically ships. This is the one
+# scenario in this generator that produces a real SQL DELETE, which is what
+# lets us exercise Debezium's delete (op='d') CDC event end-to-end.
+CANCELLATION_PROBABILITY = 0.05
+
 # Probability that an in_transit shipment hits an exception instead of progressing normally
 EXCEPTION_PROBABILITY = 0.12
 
@@ -159,7 +166,7 @@ def advance_shipments(conn):
         )
         rows = cur.fetchall()
 
-        advanced, exceptioned, resolved, returned = 0, 0, 0, 0
+        advanced, exceptioned, resolved, returned, cancelled = 0, 0, 0, 0, 0
 
         for shipment_id, status in rows:
             if status == "exception":
@@ -202,6 +209,14 @@ def advance_shipments(conn):
                 exceptioned += 1
                 continue
 
+            # Chance a still-'created' shipment gets cancelled instead of picked up.
+            # This is a real DELETE, not an UPDATE -- it's what triggers Debezium's
+            # delete (op='d') CDC event downstream.
+            if status == "created" and random.random() < CANCELLATION_PROBABILITY:
+                cur.execute("DELETE FROM shipments WHERE shipment_id = %s", (shipment_id,))
+                cancelled += 1
+                continue
+
             # Normal happy-path progression
             current_idx = HAPPY_PATH.index(status)
             if current_idx == len(HAPPY_PATH) - 1:
@@ -238,7 +253,8 @@ def advance_shipments(conn):
     conn.commit()
     print(
         f"Advance pass: {advanced} progressed, {exceptioned} hit exceptions, "
-        f"{resolved} resolved, {returned} returned. ({len(rows)} shipments were in flight)"
+        f"{resolved} resolved, {returned} returned, {cancelled} cancelled. "
+        f"({len(rows)} shipments were in flight)"
     )
 
 
