@@ -26,6 +26,7 @@ services:
     container_name: shipment-kafka
     ports:
       - "9092:9092"
+      - "29092:29092"
       - "9101:9101"
     environment:
       KAFKA_NODE_ID: 1
