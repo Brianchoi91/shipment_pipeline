@@ -5,10 +5,10 @@
 __pycache__/
 *.pyc
 .venv/
-.venv
 venv/
 *.egg-info/
-
+.ipynb_checkpoints/
+Untitled.ipynb
 # Spark / Delta
 spark-warehouse/
 metastore_db/
