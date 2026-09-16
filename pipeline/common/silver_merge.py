@@ -20,7 +20,7 @@ from pyspark.sql.types import StructType
 from pyspark.sql.window import Window
 
 from pipeline.common.schemas import TIMESTAMP_COLUMNS
-from pipeline.common.spark_session import BRONZE_PATH, CHECKPOINT_ROOT, SILVER_PATH, ensure_data_dirs, get_spark_session
+from pipeline.common.spark_session import BRONZE_PATH, CHECKPOINT_ROOT, SILVER_PATH
 
 
 def _parse_and_dedupe_batch(
@@ -77,7 +77,16 @@ def _upsert_batch(
             # First-ever batch: no silver table to merge into yet, so just write
             # the initial rows directly (excluding any deletes -- nothing to
             # delete on a table that doesn't exist yet).
-            deduped.filter(col("op") != "d").drop("op", "debezium_ts_ms").write.format(
+            #
+            # IMPORTANT: keep debezium_ts_ms here, even though it's CDC
+            # bookkeeping rather than "real" business data -- every future
+            # MERGE compares source.debezium_ts_ms against target.debezium_ts_ms
+            # to decide whether an incoming event is actually newer. Dropping
+            # it here would mean the column never exists on the table at all,
+            # and the very next merge would fail trying to reference it.
+            # `op` has no such requirement (nothing ever reads target.op), so
+            # it's the only one safe to drop.
+            deduped.filter(col("op") != "d").drop("op").write.format(
                 "delta"
             ).mode("overwrite").save(silver_path)
             return
@@ -97,20 +106,19 @@ def _upsert_batch(
         deduped.unpersist()
 
 
-def run_silver_stream(
+def start_silver_stream(
+    spark: SparkSession,
     bronze_table: str,
     silver_table: str,
     schema: StructType,
     primary_key: str,
-    app_name: str,
-) -> None:
+):
     """
-    Stream a bronze Delta table -> reconciled silver Delta table (Type 1).
-    Blocks (awaitTermination) -- meant to run as a long-lived job.
+    Build and start (non-blocking) one bronze -> silver streaming query.
+    Returns the StreamingQuery handle so a caller can run several of these
+    concurrently within one Spark session (see run_silver_processing.py),
+    the same pattern used for bronze's start_bronze_stream.
     """
-    ensure_data_dirs()
-    spark = get_spark_session(app_name=app_name)
-
     bronze_path = str(BRONZE_PATH / bronze_table)
     silver_path = str(SILVER_PATH / silver_table)
     checkpoint_path = str(CHECKPOINT_ROOT / f"silver_{silver_table}")
@@ -125,9 +133,9 @@ def run_silver_stream(
         )
         .option("checkpointLocation", checkpoint_path)
         .trigger(processingTime="10 seconds")
+        .queryName(f"silver_{silver_table}")
         .start()
     )
 
-    print(f"Streaming bronze/{bronze_table} -> silver/{silver_table} (Type 1, key={primary_key})")
-    print("Ctrl+C to stop.")
-    query.awaitTermination()
+    print(f"Started stream: bronze/{bronze_table} -> silver/{silver_table} (Type 1, key={primary_key})")
+    return query

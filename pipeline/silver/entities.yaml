@@ -1,0 +1,12 @@
+# Each entry maps one bronze table to its reconciled silver table.
+# `name` doubles as the lookup key into SCHEMA_REGISTRY in pipeline/common/schemas.py --
+# keep these in sync (adding an entity here requires a matching schema there too).
+entities:
+  - name: shipments
+    primary_key: shipment_id
+  - name: customers
+    primary_key: customer_id
+  - name: carriers
+    primary_key: carrier_id
+  - name: locations
+    primary_key: location_id

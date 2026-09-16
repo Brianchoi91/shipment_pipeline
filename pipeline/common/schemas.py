@@ -81,3 +81,12 @@ TIMESTAMP_COLUMNS = {
     "carriers": ["updated_at"],
     "locations": ["updated_at"],
 }
+
+# Lets the silver config (entities.yaml) reference a schema by entity name
+# rather than importing the StructType directly.
+SCHEMA_REGISTRY = {
+    "shipments": SHIPMENT_SCHEMA,
+    "customers": CUSTOMER_SCHEMA,
+    "carriers": CARRIER_SCHEMA,
+    "locations": LOCATION_SCHEMA,
+}
