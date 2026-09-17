@@ -8,7 +8,7 @@ __pycache__/
 venv/
 *.egg-info/
 .ipynb_checkpoints/
-Untitled.ipynb
+
 # Spark / Delta
 spark-warehouse/
 metastore_db/
@@ -16,9 +16,15 @@ metastore_db/
 _delta_log/
 derby.log
 
+# Jupyter Notebooks
+Untitled.ipynb
+
 # Data (local Delta tables, generated data — don't commit data itself)
 data/
 *.parquet
+
+# Airflow (local metadata DB, logs, generated config — not source code)
+airflow_home/
 
 # Docker
 docker-compose.override.yml
