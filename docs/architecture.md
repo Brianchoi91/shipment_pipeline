@@ -2,13 +2,16 @@
 
 ## Overview
 
-An end-to-end pipeline demonstrating CDC-driven data engineering feeding AI-consumable
-data products. A simulated logistics system generates shipment lifecycle events, which
-flow through CDC into a medallion (bronze/silver/gold) lakehouse, which is then exposed
-to AI agents via two access patterns: RAG (semantic retrieval) and MCP (tool-based
-querying).
+An end-to-end pipeline demonstrating CDC-driven data engineering feeding an AI-consumable
+data product. A simulated logistics system generates shipment lifecycle events, which
+flow through CDC into a medallion (bronze/silver/gold) lakehouse. Airflow orchestrates
+the simulated data source, and an MCP server exposes the gold layer to AI agents (Claude)
+as callable tools. A RAG layer on top of gold is the one piece still planned.
 
 ```
+Airflow (schedules the generator)
+        │
+        ▼
 Python generator → Postgres (OLTP) → Debezium (CDC) → Kafka
                                                           │
                                                           ▼
@@ -18,11 +21,14 @@ Python generator → Postgres (OLTP) → Debezium (CDC) → Kafka
                               ▼               ▼                       ▼
                            Bronze          Silver                   Gold
                         (append-only)   (Type 1, latest)   (star schema: shipment_fact +
-                                                             customer/carrier/location/date dims)
+                                                             customer/carrier/location dims)
                                                                       │
                                                         ┌─────────────┴─────────────┐
                                                         ▼                           ▼
-                                                  RAG (embeddings)          MCP server (tool calls)
+                                                  MCP server (DuckDB)          RAG (planned)
+                                                        │
+                                                        ▼
+                                                  Claude Desktop
 ```
 
 ## Key design decisions
@@ -41,7 +47,10 @@ Two source patterns were considered:
 - **Append-only event log**: a new row per lifecycle event. Simpler, but only
   exercises Debezium's INSERT handling, missing the UPDATE/DELETE story.
 
-This decision also determines the gold fact table shape (see below).
+This decision also determines the gold fact table shape (see below). Shipment
+cancellation (a real DELETE, while still in `created` status) was later added
+specifically to exercise Debezium's delete handling too, since the mutable-record
+design otherwise only produced inserts and updates.
 
 ### Why `shipment_fact` is an accumulating snapshot, not a transaction fact
 Because the source is a mutable record, gold mirrors that shape: one row per shipment,
@@ -60,11 +69,39 @@ This:
 - keeps SCD logic for dimensions independent of shipment fact logic
 - mirrors how a real logistics OLTP system would actually be modeled
 
-### Why `date_dim` isn't CDC-sourced
-It's reference data, not an operational entity — generated once via script, not
-something that changes based on business events. `shipment_fact` uses a single
-`created_date_key` FK to it; the other lifecycle milestones stay as raw timestamps
-(better for duration/transit-time calculations than additional date FKs would be).
+### Why gold has no date_dim
+A date dimension was originally planned (single `created_date_key` FK, no role-playing
+dimension) but was ultimately dropped. Everything it would have provided — day of week,
+quarter, month name, weekend flag — is one `date_format()`/`quarter()` call away from
+the real `TimestampType` columns already on `shipment_fact`, computed at query time
+rather than stored. With no BI tool consuming this gold layer (the usual reason a date
+dimension earns its keep, for building year → quarter → month hierarchies), materializing
+it wasn't worth the added table and join. `shipment_fact` keeps its full set of milestone
+timestamps directly instead.
+
+### Why gold refreshes in batch, not streaming
+Bronze and silver are both continuous Structured Streaming jobs. Gold is a batch job
+instead — run on demand or on a schedule, reading silver's current state and overwriting
+gold's tables. This matches how most real analytics consumers actually use a gold layer
+(BI tools and reports rarely need sub-minute freshness), and it decouples gold's refresh
+cadence from the ingestion layer's, which is a legitimate, common design choice — not
+just a simplification.
+
+### Why DuckDB, not Spark, for the MCP server
+An MCP tool call needs to be fast and simple — a single "look up this shipment" shouldn't
+require spinning up a JVM-backed Spark session per invocation. DuckDB reads Delta tables
+directly (via its `delta` extension), runs in-process with no JVM at all, and starts in
+milliseconds. This was a deliberate architectural choice, not a workaround: getting
+PySpark working reliably across machines (Java version compatibility, corporate network
+SSL interception blocking Maven downloads, JVM startup overhead) was a real source of
+friction earlier in this project, and an MCP tool call is exactly the wrong place to
+reintroduce that fragility.
+
+### Why stdio transport, not HTTP/SSE, for the MCP server
+The server is meant to run locally, launched by Claude Desktop via its config — matching
+everything else in this project being local-first. HTTP/SSE would make sense for a
+remote-capable, always-on service, but that's more infrastructure than this project
+needs for a local portfolio demo.
 
 ### Why local-only, JSON (not Avro), no MinIO — for now
 All deliberate scope-reduction to get one thing working end-to-end before adding
@@ -82,14 +119,14 @@ complexity:
 ## Current status
 
 - [x] Postgres schema + logical replication setup
-- [x] Debezium connector config (JSON)
-- [x] Shipment generator with lifecycle + exception branching
-- [ ] Airflow orchestration of the generator
-- [ ] Spark structured streaming: Kafka → Bronze
-- [ ] Silver: Type 1 cleansing per entity
-- [ ] Gold: accumulating snapshot fact + dimensions
+- [x] Debezium connector config (JSON), including delete handling
+- [x] Shipment generator with lifecycle, exception, and cancellation branching
+- [x] Airflow orchestration of the generator
+- [x] Spark Structured Streaming: Kafka → Bronze (config-driven, all four entities)
+- [x] Silver: Type 1 reconciliation via Delta `MERGE INTO`, including deletes
+- [x] Gold: accumulating snapshot fact + three dimensions (batch)
+- [x] MCP server on gold (DuckDB-backed), connected to Claude Desktop, verified working
 - [ ] RAG layer on gold
-- [ ] MCP server on gold
 
 ## Deferred / future upgrades
 

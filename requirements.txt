@@ -1,13 +1,17 @@
 # --- data_generator: fake shipment lifecycle data, writes to Postgres ---
 psycopg2-binary==2.9.10
 Faker==24.4.0
-python-dotenv==1.0.1
+python-dotenv==1.2.3
 
 # --- pipeline: PySpark + Delta Lake (bronze/silver/gold) ---
 pyspark==3.5.1
 delta-spark==3.2.0
-pyyaml==6.0.1
+pyyaml==6.0.3
 pandas==2.2.3
 
 # --- notebooks: VS Code / Jupyter interactive exploration ---
 ipykernel==6.29.4
+
+# --- mcp_server: MCP server exposing gold layer as tools (stdio, DuckDB-backed) ---
+fastmcp==4.0.5
+duckdb==1.5.5

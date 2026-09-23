@@ -1,137 +1,137 @@
 # Shipment Pipeline
 
-An end-to-end data engineering + AI project: a simulated logistics system feeds a
-CDC pipeline (Postgres → Debezium → Kafka), through a medallion lakehouse
-(bronze/silver/gold on Spark + Delta), exposed to AI agents via RAG and MCP.
+An end-to-end data engineering project: a simulated logistics system feeds a change-data-capture (CDC) pipeline into a medallion lakehouse (bronze/silver/gold on Spark + Delta Lake), orchestrated with Airflow, with an MCP server exposing the gold layer so an AI agent (Claude) can query it directly.
 
-See [`docs/architecture.md`](docs/architecture.md) for the full design and the
-reasoning behind key decisions.
+Everything runs locally — Postgres, Kafka, Spark, and the MCP server all run on a laptop via Docker Compose and a local Python environment. No cloud infrastructure required to try it.
+
+## Architecture
+
+```
+Python generator → Postgres (OLTP) → Debezium (CDC) → Kafka
+                                                          │
+                                                          ▼
+                                        Spark Structured Streaming
+                                                          │
+                              ┌───────────────┬───────────┴───────────┐
+                              ▼               ▼                       ▼
+                           Bronze          Silver                   Gold
+                        (append-only)   (Type 1, latest)   (star schema: shipment_fact +
+                                                             customer/carrier/location dims)
+                                                                      │
+                                                                      ▼
+                                                          MCP server (DuckDB-backed)
+                                                                      │
+                                                                      ▼
+                                                          Claude Desktop (AI agent)
+
+Orchestration: Airflow schedules the generator, driving continuous simulated activity
+through the whole pipeline.
+```
+
+## What this demonstrates
+
+- **Change data capture**: Debezium reading Postgres's write-ahead log, capturing inserts, updates, and deletes as a real CDC event stream — not batch polling.
+- **Medallion architecture**: raw CDC events (bronze) → reconciled current-state entities via Delta Lake `MERGE INTO` (silver, Type 1 slowly-changing dimensions) → a proper dimensional model (gold: an accumulating snapshot fact table plus conformed dimensions).
+- **Stream processing**: PySpark Structured Streaming, with config-driven ingestion (adding a new source table is a YAML entry, not new code).
+- **Workflow orchestration**: an Airflow DAG driving the simulated data source on a schedule.
+- **AI tool integration**: an MCP (Model Context Protocol) server exposing the gold layer as callable tools, connected to Claude Desktop — deliberately built on DuckDB rather than Spark, since a tool call needs to be fast and shouldn't require a JVM session per invocation.
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Source data generation | Python, Faker, psycopg2 |
+| Source database | PostgreSQL |
+| Change data capture | Debezium |
+| Streaming | Apache Kafka (KRaft mode, no Zookeeper) |
+| Stream processing | PySpark Structured Streaming |
+| Storage format | Delta Lake |
+| Orchestration | Apache Airflow |
+| AI tool query layer | DuckDB (reads Delta tables directly, no JVM) |
+| AI integration | MCP (FastMCP), connected to Claude Desktop |
+| Local infrastructure | Docker Compose |
 
 ## Repo structure
 
 ```
 shipment-pipeline/
-├── docker-compose.yml       # all local infra services
-├── postgres/                 # source schema DDL
-├── debezium/                 # CDC connector config
-├── data_generator/                 # fake shipment lifecycle data generator
-├── orchestration/dags/        # Airflow DAGs (next stage)
-├── pipeline/                  # PySpark bronze/silver/gold jobs (next stage)
-│   ├── bronze/
-│   ├── silver/
-│   ├── gold/
-│   └── common/                 # shared Spark/Delta session config
-├── mcp_server/                 # MCP server exposing gold layer (later stage)
-├── rag/                        # embeddings/retrieval over gold layer (later stage)
-├── docs/architecture.md        # design decisions and diagram
-└── tests/
+├── docker-compose.yml          # Postgres, Kafka, Kafka Connect, Kafka UI
+├── requirements.txt             # single dependency file for the whole project
+├── postgres/init.sql            # source schema + logical replication setup
+├── debezium/                    # CDC connector configuration
+├── data_generator/               # simulates shipment lifecycle activity
+├── orchestration/dags/           # Airflow DAG scheduling the generator
+├── pipeline/
+│   ├── common/                    # shared Spark session config, schemas, merge logic
+│   ├── bronze/                    # config-driven Kafka → Delta ingestion
+│   ├── silver/                    # config-driven Type 1 reconciliation (MERGE INTO)
+│   └── gold/                      # star schema build (batch)
+├── mcp_server/                    # MCP server exposing gold as tools (DuckDB-backed)
+└── docs/architecture.md           # detailed design decisions and rationale
 ```
 
-## Stage 1: CDC infra + generator (current)
+## Data model
 
-Postgres → Debezium → Kafka, plus the Python generator that drives shipment
-lifecycle activity. Everything below gets you this stage running.
+**Source (Postgres):** `shipments`, `customers`, `carriers`, `locations` — normalized tables, each with its own CDC topic.
 
-## What's in the stack
+**Gold (star schema):**
+- `shipment_fact` — an accumulating snapshot: one row per shipment, milestone timestamps (`created_at`, `picked_up_at`, `delivered_at`, etc.) filled in as the shipment progresses, plus a `has_exception` flag capturing whether the shipment ever hit a problem, even if later resolved
+- `customer_dim`, `carrier_dim`, `location_dim` — Type 1 (current-state only) dimensions, resolved via silver's CDC reconciliation
 
-- **Postgres** (`debezium/postgres:16` image, pre-configured with logical replication)
-- **Kafka** — single-node, KRaft mode (no Zookeeper)
-- **Kafka Connect + Debezium** — Postgres CDC connector, JSON (no schema registry yet)
-- **Kafka UI** — browser inspection of topics/messages
+See [`docs/architecture.md`](docs/architecture.md) for the reasoning behind specific design choices (why a mutable source record instead of an append-only event log, why an accumulating snapshot fact, why gold refreshes in batch rather than streaming, why DuckDB instead of Spark for the MCP layer, and others).
 
-## 1. Configure environment
+## Getting started
 
 ```bash
+# 1. Clone and set up the environment
+git clone <this-repo>
+cd shipment-pipeline
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 cp .env.example .env
-```
 
-Defaults work fine as-is for local dev. If you change credentials in `.env`, also
-update `debezium/register-postgres-connector.json` to match (it's a static REST
-payload, not templated from `.env`).
-
-## 2. Start the stack
-
-```bash
+# 2. Start local infrastructure
 docker compose up -d
-```
 
-Give it ~30 seconds for Postgres and Kafka Connect to fully initialize. Check status:
-
-```bash
-docker compose ps
-```
-
-Postgres will automatically run `postgres/init.sql` on first startup, creating the
-`customers`, `carriers`, `locations`, `shipments` tables and the logical replication
-publication.
-
-## 3. Register the Debezium connector
-
-Once Kafka Connect is up (check `curl http://localhost:8083/` returns a version),
-register the Postgres connector:
-
-```bash
+# 3. Register the Debezium connector
 curl -X POST -H "Content-Type: application/json" \
   --data @debezium/register-postgres-connector.json \
   http://localhost:8083/connectors
-```
 
-Verify it registered and is running:
-
-```bash
-curl http://localhost:8083/connectors/shipment-postgres-connector/status
-```
-
-You should see `"state": "RUNNING"` for both the connector and its task.
-
-## 4. Generate data
-
-```bash
+# 4. Seed and generate activity
 cd data_generator
-pip install -r requirements.txt
-
-# One-time: seed customers, carriers, locations
 python generate_shipments.py --seed
-
-# Create some shipments
 python generate_shipments.py --create 20
-
-# Progress them one lifecycle step
 python generate_shipments.py --advance
+cd ..
 
-# Or run continuously (creates + advances every N seconds)
-python generate_shipments.py --loop --interval 5 --new-per-cycle 3
+# 5. Run the pipeline (each in its own terminal)
+python -m pipeline.bronze.run_bronze_ingestion
+python -m pipeline.silver.run_silver_processing
+
+# 6. Build gold (batch — run after bronze/silver have real data)
+python -m pipeline.gold.run_gold_batch
+
+# 7. Run the MCP server
+python -m mcp_server.server
 ```
 
-## 5. Watch CDC events flow
+To connect the MCP server to Claude Desktop, add an entry to its config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS) pointing at this project's venv Python and `mcp_server.server` — see [`mcp_server/server.py`](mcp_server/server.py) for the exact command shape.
 
-Open Kafka UI at [http://localhost:8080](http://localhost:8080). You should see topics:
+## Current status
 
-- `shipment.public.customers`
-- `shipment.public.carriers`
-- `shipment.public.locations`
-- `shipment.public.shipments`
+- [x] CDC ingestion: Postgres → Debezium → Kafka
+- [x] Bronze: raw, append-only capture, config-driven across all source tables
+- [x] Silver: Type 1 reconciliation via Delta `MERGE INTO`, including delete handling
+- [x] Gold: star schema (accumulating snapshot fact + three dimensions)
+- [x] Orchestration: Airflow DAG driving the data generator
+- [x] MCP server: gold exposed as tools, connected to Claude Desktop, verified working
+- [ ] RAG: semantic retrieval over gold, planned next
 
-Click into `shipment.public.shipments` and watch messages appear as you run
-`--create` and `--advance`. Each message has `before` / `after` / `op` fields —
-`op: "c"` for the initial create, `op: "u"` for every lifecycle update.
+## Notes on scope
 
-## Troubleshooting
-
-- **Connector fails to register / "publication does not exist"** — Postgres's
-  `init.sql` didn't run. Check `docker compose logs postgres` — if the volume
-  already existed from a prior run, `init.sql` won't re-run. Fix: `docker compose
-  down -v` to wipe the volume and start clean.
-- **No messages in Kafka UI** — confirm the connector status is `RUNNING` (step 2),
-  and that you've actually run `--create` / `--advance` against Postgres.
-- **Kafka Connect can't reach Postgres** — service name in the connector config is
-  `postgres`, which only resolves inside the Docker network. Don't change it to
-  `localhost`.
-
-## Next steps
-
-- [ ] Airflow DAG to orchestrate the generator loop
-- [ ] PySpark structured streaming: Kafka → Bronze (Delta, append-only)
-- [ ] Silver: Type 1 cleansing/dedupe per entity
-- [ ] Gold: `shipment_fact` (accumulating snapshot) + `customer_dim`, `carrier_dim`,
-      `location_dim`, `date_dim`
+This is a personal portfolio project, and some choices reflect deliberately keeping scope manageable rather than gaps in understanding — documented in [`docs/architecture.md`](docs/architecture.md):
+- Local-only infrastructure (no cloud deployment) — a deliberate choice to prove the pipeline logic before adding cloud networking complexity
+- JSON over Avro/Schema Registry for Kafka messages (a documented, scoped-out enhancement)
+- Batch, not streaming, gold refresh — matches how most real analytics consumers actually use a gold layer
